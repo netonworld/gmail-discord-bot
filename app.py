@@ -311,6 +311,7 @@ def authorize(email):
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
+        prompt='consent',  # Fuerza re-autorización
         login_hint=email
     )
     
