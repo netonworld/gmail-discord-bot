@@ -363,14 +363,19 @@ def process_gmail_notification(email_address, history_id):
             print(f"❌ No se pudo configurar servicio para {email_address} - usuario no autorizado")
             return
         
+        print(f"🔍 Buscando cambios desde History ID: {history_id}")
+        
         # Obtener cambios desde el history_id
         history = service.users().history().list(
             userId='me',
             startHistoryId=history_id
         ).execute()
         
+        print(f"📊 Respuesta completa del history: {history}")
+        
         if 'history' not in history:
             print("ℹ️ No hay cambios en el historial")
+            print(f"🔍 Claves en respuesta: {list(history.keys())}")
             return
         
         # Procesar cada cambio
