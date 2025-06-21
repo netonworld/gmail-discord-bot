@@ -10,19 +10,22 @@ import re
 
 app = Flask(__name__)
 
-# ============= CONFIGURACIÓN =============
-# Configurar estas variables
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1386078281111179316/vLR7d3SuEY-2u_jAtxJqVbyIKNuw2SXwHYbLw_DHo29E4f_VbeCCjP-SyIgAxJySzvxP"
-GOOGLE_CREDENTIALS_FILE = "credentials.json"  # Tu archivo JSON descargado
-PROJECT_ID = "gmail-discord-bot-463619"  # Tu project ID de Google Cloud
-TOPIC_NAME = "gmail-notifications"
+# ============= CONFIGURACIÓN ACTUALIZADA =============
+# Configurar estas variables usando variables de entorno
+DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', "https://discord.com/api/webhooks/1386078281111179316/vLR7d3SuEY-2u_jAtxJqVbyIKNuw2SXwHYbLw_DHo29E4f_VbeCCjP-SyIgAxJySzvxP")
+PROJECT_ID = os.environ.get('PROJECT_ID', "gmail-discord-bot-463619")
+TOPIC_NAME = os.environ.get('TOPIC_NAME', "gmail-notifications")
 
-# Lista de cuentas Gmail a monitorear
-GMAIL_ACCOUNTS = [
-    "netflixonworld@gmail.com",
-    "netonworld1@gmail.com", 
-        # Agrega todas las cuentas que necesites
-]
+# Gmail accounts desde variable de entorno o hardcoded
+GMAIL_ACCOUNTS_ENV = os.environ.get('GMAIL_ACCOUNTS')
+if GMAIL_ACCOUNTS_ENV:
+    GMAIL_ACCOUNTS = GMAIL_ACCOUNTS_ENV.split(',')
+else:
+    GMAIL_ACCOUNTS = [
+        "netflixonworld@gmail.com",
+        "netonworld1@gmail.com", 
+        "cadete.daniel@gmail.com"
+    ]
 
 # Palabras clave para detectar pagos (personalízalas)
 PAYMENT_KEYWORDS = [
@@ -31,16 +34,41 @@ PAYMENT_KEYWORDS = [
     "mercadopago", "western union", "$", "usd", "eur", "cop", "mxn"
 ]
 
-# ============= FUNCIONES AUXILIARES =============
+# ============= FUNCIONES AUXILIARES ACTUALIZADAS =============
+
+def load_google_credentials():
+    """Carga credenciales desde variable de entorno o archivo"""
+    
+    # Intentar cargar desde variable de entorno (para Render)
+    credentials_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    if credentials_json:
+        try:
+            credentials_data = json.loads(credentials_json)
+            return service_account.Credentials.from_service_account_info(
+                credentials_data,
+                scopes=['https://www.googleapis.com/auth/gmail.readonly']
+            )
+        except Exception as e:
+            print(f"Error cargando credenciales desde variable de entorno: {e}")
+    
+    # Fallback a archivo local (para desarrollo)
+    try:
+        return service_account.Credentials.from_service_account_file(
+            'credentials.json',
+            scopes=['https://www.googleapis.com/auth/gmail.readonly']
+        )
+    except Exception as e:
+        print(f"Error cargando credenciales desde archivo: {e}")
+        return None
 
 def setup_gmail_service(email_address):
     """Configura el servicio Gmail API para una cuenta específica"""
     try:
-        # Cargar credenciales del service account
-        credentials = service_account.Credentials.from_service_account_file(
-            GOOGLE_CREDENTIALS_FILE,
-            scopes=['https://www.googleapis.com/auth/gmail.readonly']
-        )
+        # Cargar credenciales usando la nueva función
+        credentials = load_google_credentials()
+        if not credentials:
+            print(f"❌ No se pudieron cargar las credenciales")
+            return None
         
         # Delegar autoridad a la cuenta de Gmail específica
         delegated_credentials = credentials.with_subject(email_address)
