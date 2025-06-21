@@ -13,10 +13,8 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this')
 
 # ============= CONFIGURACIÓN OAUTH2 =============
-# OAuth2 configuration
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-# Client configuration
 CLIENT_CONFIG = {
     "web": {
         "client_id": os.environ.get('GOOGLE_CLIENT_ID'),
@@ -27,12 +25,10 @@ CLIENT_CONFIG = {
     }
 }
 
-# Otras configuraciones
-DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', "https://discord.com/api/webhooks/1386078281111179316/vLR7d3SuEY-2u_jAtxJqVbyIKNuw2SXwHYbLw_DHo29E4f_VbeCCjP-SyIgAxJySzvxP")
+DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 PROJECT_ID = os.environ.get('PROJECT_ID', "gmail-discord-bot-463619")
 TOPIC_NAME = os.environ.get('TOPIC_NAME', "gmail-notifications")
 
-# Gmail accounts
 GMAIL_ACCOUNTS_ENV = os.environ.get('GMAIL_ACCOUNTS')
 if GMAIL_ACCOUNTS_ENV:
     GMAIL_ACCOUNTS = GMAIL_ACCOUNTS_ENV.split(',')
@@ -43,39 +39,84 @@ else:
         "cadete.daniel@gmail.com"
     ]
 
-# Palabras clave para detectar pagos
 PAYMENT_KEYWORDS = [
     "pago recibido", "payment received", "paypal", "stripe", "transferencia",
     "deposito", "transaccion", "factura pagada", "invoice paid", "zelle",
     "mercadopago", "western union", "$", "usd", "eur", "cop", "mxn"
 ]
 
-# Storage para tokens (en producción usar base de datos)
-USER_TOKENS = {}
+# ============= FUNCIONES PARA PERSISTIR TOKENS =============
 
-# ============= FUNCIONES OAUTH2 =============
+def get_token_env_name(email):
+    """Genera nombre de variable de entorno para el token de un usuario"""
+    # Reemplazar caracteres especiales para crear nombre válido de variable
+    clean_email = email.replace('@', '_AT_').replace('.', '_DOT_').replace('+', '_PLUS_')
+    return f"OAUTH_TOKEN_{clean_email.upper()}"
 
-def get_google_flow():
-    """Crea el flow de OAuth2"""
-    flow = Flow.from_client_config(
-        CLIENT_CONFIG,
-        scopes=SCOPES
-    )
-    flow.redirect_uri = CLIENT_CONFIG["web"]["redirect_uris"][0]
-    return flow
+def save_user_token(email, credentials):
+    """Guarda el token de un usuario en variable de entorno"""
+    token_data = {
+        'token': credentials.token,
+        'refresh_token': credentials.refresh_token,
+        'token_uri': credentials.token_uri,
+        'client_id': credentials.client_id,
+        'client_secret': credentials.client_secret,
+        'scopes': credentials.scopes
+    }
+    
+    # En desarrollo, solo imprimimos (en producción esto se configuraría en Render)
+    env_name = get_token_env_name(email)
+    token_json = json.dumps(token_data)
+    
+    print(f"🔐 Token para {email}:")
+    print(f"Variable: {env_name}")
+    print(f"Valor: {token_json}")
+    print("⚠️  IMPORTANTE: Agrega esta variable en Render Environment")
+    
+    return env_name, token_json
 
-def get_gmail_service(email_address):
-    """Obtiene servicio Gmail usando OAuth2 tokens"""
-    if email_address not in USER_TOKENS:
+def load_user_token(email):
+    """Carga el token de un usuario desde variable de entorno"""
+    env_name = get_token_env_name(email)
+    token_json = os.environ.get(env_name)
+    
+    if not token_json:
+        print(f"❌ No se encontró token para {email} (variable: {env_name})")
         return None
     
     try:
-        credentials = Credentials.from_authorized_user_info(USER_TOKENS[email_address])
+        token_data = json.loads(token_json)
+        credentials = Credentials.from_authorized_user_info(token_data)
+        print(f"✅ Token cargado para {email}")
+        return credentials
+    except Exception as e:
+        print(f"❌ Error cargando token para {email}: {e}")
+        return None
+
+def get_gmail_service(email_address):
+    """Obtiene servicio Gmail usando tokens persistentes"""
+    try:
+        credentials = load_user_token(email_address)
+        if not credentials:
+            return None
+        
         service = build('gmail', 'v1', credentials=credentials)
         return service
     except Exception as e:
         print(f"Error creando servicio Gmail para {email_address}: {e}")
         return None
+
+def is_user_authorized(email):
+    """Verifica si un usuario está autorizado"""
+    return load_user_token(email) is not None
+
+# ============= FUNCIONES OAUTH2 =============
+
+def get_google_flow():
+    """Crea el flow de OAuth2"""
+    flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
+    flow.redirect_uri = CLIENT_CONFIG["web"]["redirect_uris"][0]
+    return flow
 
 # ============= FUNCIONES AUXILIARES =============
 
@@ -89,17 +130,16 @@ def extract_payment_info(email_content, subject):
         "sender": None
     }
     
-    # Buscar montos con regex
     money_patterns = [
-        r'\$\s*(\d+(?:,\d{3})*(?:\.\d{2})?)',  # $1,000.00
-        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(USD|EUR|COP|MXN|ARS)',  # 1000.00 USD
-        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*\$',  # 1000.00$
+        r'\$\s*(\d+(?:,\d{3})*(?:\.\d{2})?)',
+        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(USD|EUR|COP|MXN|ARS)',
+        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*\$',
     ]
     
     for pattern in money_patterns:
         match = re.search(pattern, email_content, re.IGNORECASE)
         if match:
-            if pattern == money_patterns[0]:  # Patrón con $
+            if pattern == money_patterns[0]:
                 payment_info["amount"] = match.group(1)
                 payment_info["currency"] = "USD"
             else:
@@ -107,7 +147,6 @@ def extract_payment_info(email_content, subject):
                 payment_info["currency"] = match.group(2) if len(match.groups()) > 1 else "USD"
             break
     
-    # Detectar método de pago
     methods = {
         "paypal": ["paypal", "paypal.com"],
         "stripe": ["stripe", "stripe.com"],
@@ -123,7 +162,6 @@ def extract_payment_info(email_content, subject):
             payment_info["method"] = method
             break
     
-    # Buscar ID de transacción
     transaction_patterns = [
         r'transaction\s*(?:id|#)?\s*:?\s*([a-zA-Z0-9]+)',
         r'reference\s*(?:id|#)?\s*:?\s*([a-zA-Z0-9]+)',
@@ -141,19 +179,17 @@ def extract_payment_info(email_content, subject):
 def send_discord_notification(email_data, payment_info):
     """Envía notificación a Discord con formato rico"""
     
-    # Determinar color basado en el monto
-    color = 0x00ff00  # Verde por defecto
+    color = 0x00ff00
     if payment_info["amount"]:
         try:
             amount = float(payment_info["amount"].replace(",", ""))
             if amount >= 1000:
-                color = 0xff0000  # Rojo para montos altos
+                color = 0xff0000
             elif amount >= 500:
-                color = 0xffa500  # Naranja para montos medios
+                color = 0xffa500
         except:
             pass
     
-    # Crear embed para Discord
     embed = {
         "title": "💰 NUEVO PAGO RECIBIDO",
         "color": color,
@@ -172,7 +208,6 @@ def send_discord_notification(email_data, payment_info):
         ]
     }
     
-    # Agregar información de pago si está disponible
     if payment_info["amount"]:
         embed["fields"].append({
             "name": "💵 Monto",
@@ -194,7 +229,6 @@ def send_discord_notification(email_data, payment_info):
             "inline": True
         })
     
-    # Agregar remitente
     if email_data.get("sender"):
         embed["fields"].append({
             "name": "👤 De",
@@ -202,7 +236,6 @@ def send_discord_notification(email_data, payment_info):
             "inline": True
         })
     
-    # Agregar preview del contenido
     if email_data.get("snippet"):
         embed["fields"].append({
             "name": "📄 Vista Previa",
@@ -210,9 +243,7 @@ def send_discord_notification(email_data, payment_info):
             "inline": False
         })
     
-    payload = {
-        "embeds": [embed]
-    }
+    payload = {"embeds": [embed]}
     
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
@@ -236,16 +267,13 @@ def get_email_details(service, message_id):
     try:
         message = service.users().messages().get(userId='me', id=message_id).execute()
         
-        # Extraer headers
         headers = message['payload'].get('headers', [])
         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'Sin asunto')
         sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Desconocido')
         
-        # Extraer contenido del email
         content = ""
         snippet = message.get('snippet', '')
         
-        # Intentar obtener el body del email
         payload = message.get('payload', {})
         if 'parts' in payload:
             for part in payload['parts']:
@@ -275,7 +303,7 @@ def get_email_details(service, message_id):
 
 @app.route('/authorize/<email>')
 def authorize(email):
-    """Inicia el flujo de autorización OAuth2 para un email específico"""
+    """Inicia el flujo de autorización OAuth2"""
     if email not in GMAIL_ACCOUNTS:
         return jsonify({"error": "Email no autorizado"}), 400
     
@@ -301,18 +329,24 @@ def oauth2callback():
         email = session.get('email')
         
         if email:
-            # Guardar tokens para este usuario
-            USER_TOKENS[email] = {
-                'token': credentials.token,
-                'refresh_token': credentials.refresh_token,
-                'token_uri': credentials.token_uri,
-                'client_id': credentials.client_id,
-                'client_secret': credentials.client_secret,
-                'scopes': credentials.scopes
-            }
+            # Guardar token persistente
+            env_name, token_json = save_user_token(email, credentials)
             
-            print(f"✅ Usuario {email} autorizado exitosamente")
-            return f"✅ Autorización exitosa para {email}. Puedes cerrar esta ventana."
+            response_html = f"""
+            <h1>✅ Autorización exitosa para {email}</h1>
+            <h2>⚠️ IMPORTANTE: Configurar Variable de Entorno</h2>
+            <p>Para que el token persista después de redeploys, agrega esta variable en Render:</p>
+            <div style="background: #f0f0f0; padding: 10px; margin: 10px 0;">
+                <strong>Variable:</strong> <code>{env_name}</code><br>
+                <strong>Valor:</strong> <textarea style="width: 100%; height: 100px;">{token_json}</textarea>
+            </div>
+            <p>1. Ve a Render → Environment → Add variable</p>
+            <p>2. Copia exactamente el nombre y valor de arriba</p>
+            <p>3. Redeploy la aplicación</p>
+            <p><strong>Puedes cerrar esta ventana.</strong></p>
+            """
+            
+            return response_html
         else:
             return "❌ Error: no se encontró el email en la sesión"
             
@@ -326,7 +360,6 @@ def oauth2callback():
 def handle_webhook():
     """Maneja las notificaciones push de Gmail"""
     try:
-        # Parsear el mensaje de Pub/Sub
         envelope = request.get_json()
         if not envelope:
             return jsonify({"error": "No JSON body"}), 400
@@ -335,7 +368,6 @@ def handle_webhook():
         if not pubsub_message:
             return jsonify({"error": "No Pub/Sub message"}), 400
         
-        # Decodificar el mensaje
         data = pubsub_message.get('data')
         if data:
             decoded_data = json.loads(base64.b64decode(data).decode('utf-8'))
@@ -345,7 +377,6 @@ def handle_webhook():
             print(f"📧 Notificación recibida para: {email_address}")
             print(f"🔍 History ID: {history_id}")
             
-            # Procesar la notificación
             process_gmail_notification(email_address, history_id)
         
         return jsonify({"status": "success"}), 200
@@ -357,7 +388,6 @@ def handle_webhook():
 def process_gmail_notification(email_address, history_id):
     """Procesa una notificación de Gmail"""
     try:
-        # Configurar servicio Gmail para esta cuenta
         service = get_gmail_service(email_address)
         if not service:
             print(f"❌ No se pudo configurar servicio para {email_address} - usuario no autorizado")
@@ -365,7 +395,6 @@ def process_gmail_notification(email_address, history_id):
         
         print(f"🔍 Buscando cambios desde History ID: {history_id}")
         
-        # Obtener cambios desde el history_id
         history = service.users().history().list(
             userId='me',
             startHistoryId=history_id
@@ -378,28 +407,23 @@ def process_gmail_notification(email_address, history_id):
             print(f"🔍 Claves en respuesta: {list(history.keys())}")
             return
         
-        # Procesar cada cambio
         for record in history['history']:
             if 'messagesAdded' in record:
                 for message_added in record['messagesAdded']:
                     message_id = message_added['message']['id']
                     
-                    # Obtener detalles del email
                     email_details = get_email_details(service, message_id)
                     if not email_details:
                         continue
                     
-                    # Verificar si es un email de pago
                     if is_payment_email(email_details['subject'], email_details['content']):
                         print(f"💰 Email de pago detectado: {email_details['subject']}")
                         
-                        # Extraer información de pago
                         payment_info = extract_payment_info(
                             email_details['content'], 
                             email_details['subject']
                         )
                         
-                        # Preparar datos para Discord
                         email_data = {
                             "account": email_address,
                             "subject": email_details['subject'],
@@ -407,7 +431,6 @@ def process_gmail_notification(email_address, history_id):
                             "snippet": email_details['snippet']
                         }
                         
-                        # Enviar notificación a Discord
                         send_discord_notification(email_data, payment_info)
                     else:
                         print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
@@ -417,11 +440,11 @@ def process_gmail_notification(email_address, history_id):
 
 @app.route('/setup', methods=['GET', 'POST'])
 def setup_gmail_watch():
-    """Configura Gmail watch para todas las cuentas autorizadas"""
+    """Configura Gmail watch para cuentas autorizadas"""
     results = []
     
     for email_address in GMAIL_ACCOUNTS:
-        if email_address not in USER_TOKENS:
+        if not is_user_authorized(email_address):
             results.append({
                 "email": email_address,
                 "status": "error",
@@ -439,14 +462,12 @@ def setup_gmail_watch():
                 })
                 continue
             
-            # Configurar watch request
             request_body = {
                 'topicName': f'projects/{PROJECT_ID}/topics/{TOPIC_NAME}',
                 'labelIds': ['INBOX'],
                 'labelFilterBehavior': 'INCLUDE'
             }
             
-            # Ejecutar watch
             watch_response = service.users().watch(userId='me', body=request_body).execute()
             
             results.append({
@@ -470,12 +491,14 @@ def setup_gmail_watch():
 
 @app.route('/status')
 def status():
-    """Muestra el estado de autorización de cada cuenta"""
+    """Muestra el estado de autorización"""
     status_info = {}
     for email in GMAIL_ACCOUNTS:
+        authorized = is_user_authorized(email)
         status_info[email] = {
-            "authorized": email in USER_TOKENS,
-            "authorization_url": f"/authorize/{email}" if email not in USER_TOKENS else None
+            "authorized": authorized,
+            "authorization_url": f"/authorize/{email}" if not authorized else None,
+            "token_env_var": get_token_env_name(email) if not authorized else None
         }
     
     return jsonify(status_info)
@@ -483,11 +506,13 @@ def status():
 @app.route('/test', methods=['GET'])
 def test_endpoint():
     """Endpoint de prueba"""
+    authorized_count = sum(1 for email in GMAIL_ACCOUNTS if is_user_authorized(email))
+    
     return jsonify({
         "status": "Server running",
         "timestamp": datetime.utcnow().isoformat(),
         "configured_accounts": len(GMAIL_ACCOUNTS),
-        "authorized_accounts": len(USER_TOKENS)
+        "authorized_accounts": authorized_count
     })
 
 @app.route('/health', methods=['GET'])
@@ -505,7 +530,7 @@ def index():
     """
     
     for email in GMAIL_ACCOUNTS:
-        if email in USER_TOKENS:
+        if is_user_authorized(email):
             html += f"<li>✅ {email} - Autorizado</li>"
         else:
             html += f'<li>❌ {email} - <a href="/authorize/{email}">Autorizar</a></li>'
@@ -518,12 +543,9 @@ def index():
     
     return html
 
-# ============= EJECUTAR SERVIDOR =============
 if __name__ == '__main__':
-    print("🚀 Iniciando servidor Gmail-Discord con OAuth2...")
+    print("🚀 Iniciando servidor Gmail-Discord con tokens persistentes...")
     print(f"📧 Cuentas configuradas: {len(GMAIL_ACCOUNTS)}")
-    print(f"🔗 Webhook URL: /webhook")
-    print(f"⚙️ Setup URL: /setup")
-    print(f"🔐 Authorization URLs: /authorize/<email>")
+    print(f"🔐 Tokens persistentes habilitados")
     
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
