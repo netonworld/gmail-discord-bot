@@ -1,84 +1,83 @@
 import os
 import json
 import base64
-from flask import Flask, request, jsonify
-from google.oauth2 import service_account
+from flask import Flask, request, jsonify, redirect, session
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import requests
 from datetime import datetime
 import re
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this')
 
-# ============= CONFIGURACIÓN ACTUALIZADA =============
-# Configurar estas variables usando variables de entorno
+# ============= CONFIGURACIÓN OAUTH2 =============
+# OAuth2 configuration
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+# Client configuration
+CLIENT_CONFIG = {
+    "web": {
+        "client_id": os.environ.get('GOOGLE_CLIENT_ID'),
+        "client_secret": os.environ.get('GOOGLE_CLIENT_SECRET'),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [os.environ.get('REDIRECT_URI', 'https://gmail-discord-bot.onrender.com/oauth2callback')]
+    }
+}
+
+# Otras configuraciones
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', "https://discord.com/api/webhooks/1386078281111179316/vLR7d3SuEY-2u_jAtxJqVbyIKNuw2SXwHYbLw_DHo29E4f_VbeCCjP-SyIgAxJySzvxP")
 PROJECT_ID = os.environ.get('PROJECT_ID', "gmail-discord-bot-463619")
 TOPIC_NAME = os.environ.get('TOPIC_NAME', "gmail-notifications")
 
-# Gmail accounts desde variable de entorno o hardcoded
+# Gmail accounts
 GMAIL_ACCOUNTS_ENV = os.environ.get('GMAIL_ACCOUNTS')
 if GMAIL_ACCOUNTS_ENV:
     GMAIL_ACCOUNTS = GMAIL_ACCOUNTS_ENV.split(',')
 else:
     GMAIL_ACCOUNTS = [
-        "netflixonworld@gmail.com",
-        "netonworld1@gmail.com", 
+        "netonworld1@gmail.com",
+        "netflixonworld@gmail.com", 
         "cadete.daniel@gmail.com"
     ]
 
-# Palabras clave para detectar pagos (personalízalas)
+# Palabras clave para detectar pagos
 PAYMENT_KEYWORDS = [
     "pago recibido", "payment received", "paypal", "stripe", "transferencia",
     "deposito", "transaccion", "factura pagada", "invoice paid", "zelle",
     "mercadopago", "western union", "$", "usd", "eur", "cop", "mxn"
 ]
 
-# ============= FUNCIONES AUXILIARES ACTUALIZADAS =============
+# Storage para tokens (en producción usar base de datos)
+USER_TOKENS = {}
 
-def load_google_credentials():
-    """Carga credenciales desde variable de entorno o archivo"""
-    
-    # Intentar cargar desde variable de entorno (para Render)
-    credentials_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-    if credentials_json:
-        try:
-            credentials_data = json.loads(credentials_json)
-            return service_account.Credentials.from_service_account_info(
-                credentials_data,
-                scopes=['https://www.googleapis.com/auth/gmail.readonly']
-            )
-        except Exception as e:
-            print(f"Error cargando credenciales desde variable de entorno: {e}")
-    
-    # Fallback a archivo local (para desarrollo)
-    try:
-        return service_account.Credentials.from_service_account_file(
-            'credentials.json',
-            scopes=['https://www.googleapis.com/auth/gmail.readonly']
-        )
-    except Exception as e:
-        print(f"Error cargando credenciales desde archivo: {e}")
+# ============= FUNCIONES OAUTH2 =============
+
+def get_google_flow():
+    """Crea el flow de OAuth2"""
+    flow = Flow.from_client_config(
+        CLIENT_CONFIG,
+        scopes=SCOPES
+    )
+    flow.redirect_uri = CLIENT_CONFIG["web"]["redirect_uris"][0]
+    return flow
+
+def get_gmail_service(email_address):
+    """Obtiene servicio Gmail usando OAuth2 tokens"""
+    if email_address not in USER_TOKENS:
         return None
-
-def setup_gmail_service(email_address):
-    """Configura el servicio Gmail API para una cuenta específica"""
+    
     try:
-        # Cargar credenciales usando la nueva función
-        credentials = load_google_credentials()
-        if not credentials:
-            print(f"❌ No se pudieron cargar las credenciales")
-            return None
-        
-        # Delegar autoridad a la cuenta de Gmail específica
-        delegated_credentials = credentials.with_subject(email_address)
-        
-        # Crear servicio Gmail
-        service = build('gmail', 'v1', credentials=delegated_credentials)
+        credentials = Credentials.from_authorized_user_info(USER_TOKENS[email_address])
+        service = build('gmail', 'v1', credentials=credentials)
         return service
     except Exception as e:
-        print(f"Error configurando Gmail service para {email_address}: {e}")
+        print(f"Error creando servicio Gmail para {email_address}: {e}")
         return None
+
+# ============= FUNCIONES AUXILIARES =============
 
 def extract_payment_info(email_content, subject):
     """Extrae información de pago del email"""
@@ -272,7 +271,56 @@ def get_email_details(service, message_id):
         print(f"Error obteniendo detalles del email: {e}")
         return None
 
-# ============= RUTAS FLASK =============
+# ============= RUTAS OAUTH2 =============
+
+@app.route('/authorize/<email>')
+def authorize(email):
+    """Inicia el flujo de autorización OAuth2 para un email específico"""
+    if email not in GMAIL_ACCOUNTS:
+        return jsonify({"error": "Email no autorizado"}), 400
+    
+    flow = get_google_flow()
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        login_hint=email
+    )
+    
+    session['state'] = state
+    session['email'] = email
+    return redirect(authorization_url)
+
+@app.route('/oauth2callback')
+def oauth2callback():
+    """Callback de OAuth2"""
+    try:
+        flow = get_google_flow()
+        flow.fetch_token(authorization_response=request.url)
+        
+        credentials = flow.credentials
+        email = session.get('email')
+        
+        if email:
+            # Guardar tokens para este usuario
+            USER_TOKENS[email] = {
+                'token': credentials.token,
+                'refresh_token': credentials.refresh_token,
+                'token_uri': credentials.token_uri,
+                'client_id': credentials.client_id,
+                'client_secret': credentials.client_secret,
+                'scopes': credentials.scopes
+            }
+            
+            print(f"✅ Usuario {email} autorizado exitosamente")
+            return f"✅ Autorización exitosa para {email}. Puedes cerrar esta ventana."
+        else:
+            return "❌ Error: no se encontró el email en la sesión"
+            
+    except Exception as e:
+        print(f"❌ Error en OAuth2 callback: {e}")
+        return f"❌ Error en autorización: {e}"
+
+# ============= RUTAS PRINCIPALES =============
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -310,9 +358,9 @@ def process_gmail_notification(email_address, history_id):
     """Procesa una notificación de Gmail"""
     try:
         # Configurar servicio Gmail para esta cuenta
-        service = setup_gmail_service(email_address)
+        service = get_gmail_service(email_address)
         if not service:
-            print(f"❌ No se pudo configurar servicio para {email_address}")
+            print(f"❌ No se pudo configurar servicio para {email_address} - usuario no autorizado")
             return
         
         # Obtener cambios desde el history_id
@@ -362,14 +410,22 @@ def process_gmail_notification(email_address, history_id):
     except Exception as e:
         print(f"❌ Error procesando notificación de Gmail: {e}")
 
-@app.route('/setup', methods=['POST'])
+@app.route('/setup', methods=['GET', 'POST'])
 def setup_gmail_watch():
-    """Configura Gmail watch para todas las cuentas"""
+    """Configura Gmail watch para todas las cuentas autorizadas"""
     results = []
     
     for email_address in GMAIL_ACCOUNTS:
+        if email_address not in USER_TOKENS:
+            results.append({
+                "email": email_address,
+                "status": "error",
+                "message": f"Usuario no autorizado. Visita /authorize/{email_address}"
+            })
+            continue
+            
         try:
-            service = setup_gmail_service(email_address)
+            service = get_gmail_service(email_address)
             if not service:
                 results.append({
                     "email": email_address,
@@ -381,7 +437,7 @@ def setup_gmail_watch():
             # Configurar watch request
             request_body = {
                 'topicName': f'projects/{PROJECT_ID}/topics/{TOPIC_NAME}',
-                'labelIds': ['INBOX'],  # Solo emails en INBOX
+                'labelIds': ['INBOX'],
                 'labelFilterBehavior': 'INCLUDE'
             }
             
@@ -407,13 +463,26 @@ def setup_gmail_watch():
     
     return jsonify({"results": results})
 
+@app.route('/status')
+def status():
+    """Muestra el estado de autorización de cada cuenta"""
+    status_info = {}
+    for email in GMAIL_ACCOUNTS:
+        status_info[email] = {
+            "authorized": email in USER_TOKENS,
+            "authorization_url": f"/authorize/{email}" if email not in USER_TOKENS else None
+        }
+    
+    return jsonify(status_info)
+
 @app.route('/test', methods=['GET'])
 def test_endpoint():
     """Endpoint de prueba"""
     return jsonify({
         "status": "Server running",
         "timestamp": datetime.utcnow().isoformat(),
-        "configured_accounts": len(GMAIL_ACCOUNTS)
+        "configured_accounts": len(GMAIL_ACCOUNTS),
+        "authorized_accounts": len(USER_TOKENS)
     })
 
 @app.route('/health', methods=['GET'])
@@ -421,12 +490,35 @@ def health_check():
     """Health check para el servidor"""
     return jsonify({"status": "healthy"}), 200
 
+@app.route('/')
+def index():
+    """Página principal con links de autorización"""
+    html = """
+    <h1>Gmail Discord Bot</h1>
+    <h2>Autorizar Cuentas Gmail:</h2>
+    <ul>
+    """
+    
+    for email in GMAIL_ACCOUNTS:
+        if email in USER_TOKENS:
+            html += f"<li>✅ {email} - Autorizado</li>"
+        else:
+            html += f'<li>❌ {email} - <a href="/authorize/{email}">Autorizar</a></li>'
+    
+    html += """
+    </ul>
+    <p><a href="/status">Ver Status JSON</a></p>
+    <p><a href="/setup">Configurar Watches</a></p>
+    """
+    
+    return html
+
 # ============= EJECUTAR SERVIDOR =============
 if __name__ == '__main__':
-    print("🚀 Iniciando servidor Gmail-Discord...")
+    print("🚀 Iniciando servidor Gmail-Discord con OAuth2...")
     print(f"📧 Cuentas configuradas: {len(GMAIL_ACCOUNTS)}")
-    print(f"🔗 Webhook URL necesaria: /webhook")
+    print(f"🔗 Webhook URL: /webhook")
     print(f"⚙️ Setup URL: /setup")
+    print(f"🔐 Authorization URLs: /authorize/<email>")
     
-    # Ejecutar en puerto 8080 (cambiar según necesidad)
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
