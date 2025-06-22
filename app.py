@@ -56,6 +56,13 @@ PAYMENT_PROVIDERS = {
     }
 }
 
+# Mantener las palabras clave generales como backup
+PAYMENT_KEYWORDS = [
+    "pago recibido", "payment received", "payment successful", "transacción exitosa",
+    "transferencia recibida", "transfer completed", "deposito realizado",
+    "factura pagada", "invoice paid", "cobro realizado"
+]
+
 # Storage para control de duplicados (en memoria)
 PROCESSED_MESSAGES = set()
 
