@@ -650,8 +650,7 @@ def process_gmail_notification(email_address, history_id):
             try:
                 history = service.users().history().list(
                     userId='me',
-                    startHistoryId=last_history_id,
-                    labelIds=['INBOX']
+                    startHistoryId=last_history_id
                 ).execute()
                 
                 print(f"📊 Respuesta del history: {history}")
