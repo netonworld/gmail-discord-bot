@@ -232,7 +232,7 @@ def extract_payment_info(email_content, subject):
         money_patterns = [
             r'\$\s*(\d+(?:,\d{3})*(?:\.\d{2})?)',
             r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(USD|EUR|COP|MXN|ARS)',
-            r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*\
+            r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*\$'
 
 def detect_payment_provider(email_details):
     """Detecta si un email es de un proveedor de pagos específico"""
