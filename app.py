@@ -39,6 +39,38 @@ else:
         "cadete.daniel@gmail.com"
     ]
 
+# ============= ALMACENAMIENTO DE HISTORY IDS =============
+# En producción, esto debería estar en una base de datos o Redis
+STORED_HISTORY_IDS = {}
+
+def get_history_id_env_name(email):
+    """Genera nombre de variable de entorno para el history ID de un usuario"""
+    clean_email = email.replace('@', '_AT_').replace('.', '_DOT_').replace('+', '_PLUS_')
+    return f"HISTORY_ID_{clean_email.upper()}"
+
+def save_history_id(email, history_id):
+    """Guarda el último history ID procesado"""
+    STORED_HISTORY_IDS[email] = history_id
+    # En producción, también guardar en variable de entorno
+    env_name = get_history_id_env_name(email)
+    print(f"💾 Guardando History ID para {email}: {history_id}")
+    print(f"   Variable de entorno: {env_name}={history_id}")
+
+def get_last_history_id(email):
+    """Obtiene el último history ID procesado"""
+    # Primero intentar memoria
+    if email in STORED_HISTORY_IDS:
+        return STORED_HISTORY_IDS[email]
+    
+    # Luego intentar variable de entorno
+    env_name = get_history_id_env_name(email)
+    history_id = os.environ.get(env_name)
+    if history_id:
+        STORED_HISTORY_IDS[email] = history_id
+        return history_id
+    
+    return None
+
 # ============= CONFIGURACIÓN DE CANALES ESPECÍFICOS =============
 
 # Configuración para detectar pagos específicos por plataforma
@@ -248,6 +280,83 @@ def detect_payment_provider(email_details):
     
     return None, None
 
+def send_discord_notification(email_data, payment_info):
+    """Envía notificación general a Discord"""
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ No hay webhook de Discord configurado")
+        return False
+    
+    print(f"🚀 Enviando notificación para: {email_data.get('subject', 'Sin asunto')}")
+    
+    embed = {
+        "title": "💰 NUEVO PAGO RECIBIDO",
+        "color": 0x00ff00,
+        "timestamp": datetime.utcnow().isoformat(),
+        "fields": [
+            {
+                "name": "📧 Cuenta Gmail",
+                "value": email_data.get("account", "No especificada"),
+                "inline": True
+            },
+            {
+                "name": "📝 Asunto",
+                "value": email_data.get("subject", "Sin asunto")[:100],
+                "inline": False
+            }
+        ]
+    }
+    
+    # Agregar información de pago si está disponible
+    if payment_info["amount"]:
+        embed["fields"].append({
+            "name": "💵 Monto",
+            "value": f"{payment_info['amount']} {payment_info['currency'] or 'USD'}",
+            "inline": True
+        })
+    
+    if payment_info["method"]:
+        embed["fields"].append({
+            "name": "💳 Método",
+            "value": payment_info["method"],
+            "inline": True
+        })
+    
+    if payment_info["transaction_id"]:
+        embed["fields"].append({
+            "name": "🔍 ID Transacción",
+            "value": payment_info["transaction_id"],
+            "inline": True
+        })
+    
+    if email_data.get("sender"):
+        embed["fields"].append({
+            "name": "👤 De",
+            "value": email_data["sender"],
+            "inline": True
+        })
+    
+    if email_data.get("snippet"):
+        embed["fields"].append({
+            "name": "📄 Vista Previa",
+            "value": email_data["snippet"][:200] + "..." if len(email_data["snippet"]) > 200 else email_data["snippet"],
+            "inline": False
+        })
+    
+    payload = {"embeds": [embed]}
+    
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        
+        if response.status_code == 204:
+            print("✅ Notificación enviada exitosamente")
+            return True
+        else:
+            print(f"❌ Error enviando notificación: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Error enviando notificación: {e}")
+        return False
+
 def send_provider_notification(email_data, payment_info, provider_id, provider_config):
     """Envía notificación específica del proveedor"""
     
@@ -453,7 +562,7 @@ def handle_webhook():
             history_id = decoded_data.get('historyId')
             
             print(f"📧 Notificación recibida para: {email_address}")
-            print(f"🔍 History ID: {history_id}")
+            print(f"🔍 History ID recibido: {history_id}")
             
             process_gmail_notification(email_address, history_id)
         
@@ -471,109 +580,142 @@ def process_gmail_notification(email_address, history_id):
             print(f"❌ No se pudo configurar servicio para {email_address} - usuario no autorizado")
             return
         
-        print(f"🔍 Buscando cambios desde History ID: {history_id}")
+        # Obtener el último history ID procesado
+        last_history_id = get_last_history_id(email_address)
         
-        history = service.users().history().list(
-            userId='me',
-            startHistoryId=history_id
-        ).execute()
-        
-        print(f"📊 Respuesta completa del history: {history}")
-        
-        if 'history' not in history:
-            print("ℹ️ No hay cambios en el historial")
-            print(f"🔍 Claves en respuesta: {list(history.keys())}")
-            return
-        
-        print(f"🔍 Procesando {len(history['history'])} registros de historial")
-        
-        # Procesar cada cambio
-        for i, record in enumerate(history['history']):
-            print(f"📝 Procesando registro {i+1}: {record}")
+        if not last_history_id:
+            # Si no tenemos history ID anterior, obtener los últimos mensajes
+            print(f"⚠️ No hay history ID anterior para {email_address}, obteniendo mensajes recientes")
             
-            if 'messagesAdded' in record:
-                print(f"📬 Encontrados mensajes agregados: {len(record['messagesAdded'])}")
-                for j, message_added in enumerate(record['messagesAdded']):
-                    message_id = message_added['message']['id']
-                    print(f"📧 Procesando mensaje {j+1} con ID: {message_id}")
+            # Obtener los últimos 10 mensajes
+            results = service.users().messages().list(
+                userId='me',
+                labelIds=['INBOX'],
+                maxResults=10
+            ).execute()
+            
+            messages = results.get('messages', [])
+            print(f"📬 Encontrados {len(messages)} mensajes recientes")
+            
+            for message in messages:
+                message_id = message['id']
+                
+                # Verificar si ya procesamos este mensaje
+                if is_duplicate_message(message_id):
+                    print(f"⏭️ Mensaje ya procesado, saltando: {message_id}")
+                    continue
+                
+                # Obtener detalles del email
+                email_details = get_email_details(service, message_id)
+                if not email_details:
+                    print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
+                    continue
+                
+                print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
+                
+                # Verificar si es un email de pago
+                if is_payment_email(email_details['subject'], email_details['content']):
+                    print(f"💰 Email de pago detectado: {email_details['subject']}")
                     
-                    # Obtener detalles del email
-                    email_details = get_email_details(service, message_id)
-                    if not email_details:
-                        print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
-                        continue
+                    # Extraer información de pago
+                    payment_info = extract_payment_info(
+                        email_details['content'], 
+                        email_details['subject']
+                    )
                     
-                    # Verificar si ya procesamos este mensaje
-                    if is_duplicate_message(message_id):
-                        print(f"⏭️ Mensaje ya procesado, saltando: {message_id}")
-                        continue
+                    # Preparar datos para Discord
+                    email_data = {
+                        "account": email_address,
+                        "subject": email_details['subject'],
+                        "sender": email_details['sender'],
+                        "snippet": email_details['snippet']
+                    }
                     
-                    # Verificar si es un email reciente
-                    if not is_recent_email(email_details):
-                        print(f"⏰ Email muy antiguo, saltando: {email_details['subject']}")
-                        continue
+                    # Detectar proveedor específico
+                    provider_id, provider_config = detect_payment_provider(email_details)
                     
-                    print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
-                    print(f"📄 Contenido preview: {email_details['content'][:100]}...")
-                    
-                    # Verificar si es un email de pago
-                    if is_payment_email(email_details['subject'], email_details['content']):
-                        print(f"💰 Email de pago detectado: {email_details['subject']}")
-                        
-                        # Extraer información de pago
-                        payment_info = extract_payment_info(
-                            email_details['content'], 
-                            email_details['subject']
-                        )
-                        
-                        # Preparar datos para Discord
-                        email_data = {
-                            "account": email_address,
-                            "subject": email_details['subject'],
-                            "sender": email_details['sender'],
-                            "snippet": email_details['snippet']
-                        }
-                        
-                        # Enviar notificación a Discord
-                        send_discord_notification(email_data, payment_info)
+                    if provider_id and provider_config:
+                        # Enviar a webhook específico del proveedor
+                        send_provider_notification(email_data, payment_info, provider_id, provider_config)
                     else:
-                        print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
-            else:
-                print(f"🔍 Registro no contiene 'messagesAdded': {list(record.keys())}")
-                if 'messages' in record:
-                    print(f"📬 Encontrado campo 'messages': {record['messages']}")
-                    # Procesar mensajes en formato diferente
-                    for j, message in enumerate(record['messages']):
-                        message_id = message['id']
-                        print(f"📧 Procesando mensaje alternativo {j+1} con ID: {message_id}")
-                        
-                        email_details = get_email_details(service, message_id)
-                        if not email_details:
-                            print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
-                            continue
-                        
-                        print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
-                        
-                        if is_payment_email(email_details['subject'], email_details['content']):
-                            print(f"💰 Email de pago detectado: {email_details['subject']}")
-                            
-                            payment_info = extract_payment_info(
-                                email_details['content'], 
-                                email_details['subject']
-                            )
-                            
-                            email_data = {
-                                "account": email_address,
-                                "subject": email_details['subject'],
-                                "sender": email_details['sender'],
-                                "snippet": email_details['snippet']
-                            }
-                            
-                            send_discord_notification(email_data, payment_info)
-                        else:
-                            print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
+                        # Enviar notificación general
+                        send_discord_notification(email_data, payment_info)
+                else:
+                    print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
+            
+        else:
+            # Si tenemos history ID anterior, buscar cambios
+            print(f"🔍 Buscando cambios desde History ID anterior: {last_history_id}")
+            
+            try:
+                history = service.users().history().list(
+                    userId='me',
+                    startHistoryId=last_history_id,
+                    labelIds=['INBOX']
+                ).execute()
+                
+                print(f"📊 Respuesta del history: {history}")
+                
+                if 'history' in history:
+                    print(f"🔍 Procesando {len(history['history'])} registros de historial")
+                    
+                    for record in history['history']:
+                        if 'messagesAdded' in record:
+                            for message_added in record['messagesAdded']:
+                                message_id = message_added['message']['id']
+                                
+                                # Verificar si ya procesamos este mensaje
+                                if is_duplicate_message(message_id):
+                                    print(f"⏭️ Mensaje ya procesado, saltando: {message_id}")
+                                    continue
+                                
+                                # Obtener detalles del email
+                                email_details = get_email_details(service, message_id)
+                                if not email_details:
+                                    continue
+                                
+                                print(f"📄 Email nuevo - Asunto: {email_details['subject']}")
+                                
+                                # Verificar si es un email de pago
+                                if is_payment_email(email_details['subject'], email_details['content']):
+                                    print(f"💰 Email de pago detectado: {email_details['subject']}")
+                                    
+                                    payment_info = extract_payment_info(
+                                        email_details['content'], 
+                                        email_details['subject']
+                                    )
+                                    
+                                    email_data = {
+                                        "account": email_address,
+                                        "subject": email_details['subject'],
+                                        "sender": email_details['sender'],
+                                        "snippet": email_details['snippet']
+                                    }
+                                    
+                                    # Detectar proveedor específico
+                                    provider_id, provider_config = detect_payment_provider(email_details)
+                                    
+                                    if provider_id and provider_config:
+                                        send_provider_notification(email_data, payment_info, provider_id, provider_config)
+                                    else:
+                                        send_discord_notification(email_data, payment_info)
+                else:
+                    print("ℹ️ No hay nuevos cambios en el historial")
+                    
+            except Exception as e:
+                if "startHistoryId" in str(e):
+                    print(f"⚠️ History ID muy antiguo, obteniendo mensajes recientes")
+                    # Procesar como si no tuviéramos history ID
+                    last_history_id = None
+                    process_gmail_notification(email_address, history_id)
+                    return
+                else:
+                    raise e
         
-        print("✅ Procesamiento de historial completado")
+        # Guardar el nuevo history ID
+        save_history_id(email_address, history_id)
+        print("✅ Procesamiento completado")
+        
     except Exception as e:
         print(f"❌ Error procesando notificación de Gmail: {e}")
 
@@ -609,14 +751,19 @@ def setup_gmail_watch():
             
             watch_response = service.users().watch(userId='me', body=request_body).execute()
             
+            # Guardar el history ID inicial
+            history_id = watch_response.get('historyId')
+            if history_id:
+                save_history_id(email_address, history_id)
+            
             results.append({
                 "email": email_address,
                 "status": "success",
-                "historyId": watch_response.get('historyId'),
+                "historyId": history_id,
                 "expiration": watch_response.get('expiration')
             })
             
-            print(f"✅ Watch configurado para {email_address}")
+            print(f"✅ Watch configurado para {email_address} con History ID: {history_id}")
             
         except Exception as e:
             results.append({
@@ -634,10 +781,14 @@ def status():
     status_info = {}
     for email in GMAIL_ACCOUNTS:
         authorized = is_user_authorized(email)
+        last_history_id = get_last_history_id(email) if authorized else None
+        
         status_info[email] = {
             "authorized": authorized,
+            "last_history_id": last_history_id,
             "authorization_url": f"/authorize/{email}" if not authorized else None,
-            "token_env_var": get_token_env_name(email) if not authorized else None
+            "token_env_var": get_token_env_name(email) if not authorized else None,
+            "history_env_var": get_history_id_env_name(email)
         }
     
     return jsonify(status_info)
@@ -651,7 +802,8 @@ def test_endpoint():
         "status": "Server running",
         "timestamp": datetime.utcnow().isoformat(),
         "configured_accounts": len(GMAIL_ACCOUNTS),
-        "authorized_accounts": authorized_count
+        "authorized_accounts": authorized_count,
+        "stored_history_ids": {email: get_last_history_id(email) for email in GMAIL_ACCOUNTS}
     })
 
 @app.route('/health', methods=['GET'])
@@ -664,27 +816,135 @@ def index():
     """Página principal con links de autorización"""
     html = """
     <h1>Gmail Discord Bot</h1>
-    <h2>Autorizar Cuentas Gmail:</h2>
-    <ul>
+    <h2>Estado de Cuentas Gmail:</h2>
+    <table border="1" style="border-collapse: collapse; margin: 20px 0;">
+        <tr>
+            <th style="padding: 10px;">Email</th>
+            <th style="padding: 10px;">Estado</th>
+            <th style="padding: 10px;">Último History ID</th>
+            <th style="padding: 10px;">Acción</th>
+        </tr>
     """
     
     for email in GMAIL_ACCOUNTS:
-        if is_user_authorized(email):
-            html += f"<li>✅ {email} - Autorizado</li>"
+        is_authorized = is_user_authorized(email)
+        last_history_id = get_last_history_id(email) if is_authorized else "N/A"
+        
+        if is_authorized:
+            status = "✅ Autorizado"
+            action = "Listo"
         else:
-            html += f'<li>❌ {email} - <a href="/authorize/{email}">Autorizar</a></li>'
+            status = "❌ No autorizado"
+            action = f'<a href="/authorize/{email}">Autorizar</a>'
+        
+        html += f"""
+        <tr>
+            <td style="padding: 10px;">{email}</td>
+            <td style="padding: 10px;">{status}</td>
+            <td style="padding: 10px;">{last_history_id}</td>
+            <td style="padding: 10px;">{action}</td>
+        </tr>
+        """
     
     html += """
+    </table>
+    <h3>Enlaces útiles:</h3>
+    <ul>
+        <li><a href="/status">Ver Status JSON</a></li>
+        <li><a href="/setup">Configurar/Renovar Watches</a></li>
+        <li><a href="/test">Test Endpoint</a></li>
     </ul>
-    <p><a href="/status">Ver Status JSON</a></p>
-    <p><a href="/setup">Configurar Watches</a></p>
+    
+    <h3>Variables de entorno necesarias:</h3>
+    <pre style="background: #f0f0f0; padding: 10px;">
+GOOGLE_CLIENT_ID=tu_client_id
+GOOGLE_CLIENT_SECRET=tu_client_secret
+DISCORD_WEBHOOK_URL=tu_webhook_url
+BINANCE_WEBHOOK_URL=webhook_especifico_binance (opcional)
+REDIRECT_URI=https://tu-dominio.onrender.com/oauth2callback
+PROJECT_ID=tu_project_id
+TOPIC_NAME=gmail-notifications
+FLASK_SECRET_KEY=una_clave_secreta_segura
+    </pre>
     """
     
     return html
+
+@app.route('/test-notification/<email>')
+def test_notification(email):
+    """Endpoint para probar notificaciones con un email específico"""
+    if email not in GMAIL_ACCOUNTS:
+        return jsonify({"error": "Email no autorizado"}), 400
+    
+    if not is_user_authorized(email):
+        return jsonify({"error": f"Email no autorizado. Visita /authorize/{email}"}), 400
+    
+    try:
+        service = get_gmail_service(email)
+        
+        # Obtener el último mensaje
+        results = service.users().messages().list(
+            userId='me',
+            labelIds=['INBOX'],
+            maxResults=1
+        ).execute()
+        
+        messages = results.get('messages', [])
+        if not messages:
+            return jsonify({"error": "No hay mensajes en el inbox"}), 404
+        
+        message_id = messages[0]['id']
+        email_details = get_email_details(service, message_id)
+        
+        if not email_details:
+            return jsonify({"error": "No se pudieron obtener detalles del mensaje"}), 500
+        
+        # Forzar envío de notificación
+        payment_info = extract_payment_info(
+            email_details['content'], 
+            email_details['subject']
+        )
+        
+        email_data = {
+            "account": email,
+            "subject": email_details['subject'],
+            "sender": email_details['sender'],
+            "snippet": email_details['snippet']
+        }
+        
+        # Detectar proveedor
+        provider_id, provider_config = detect_payment_provider(email_details)
+        
+        if provider_id and provider_config:
+            result = send_provider_notification(email_data, payment_info, provider_id, provider_config)
+            return jsonify({
+                "status": "sent",
+                "provider": provider_id,
+                "email_subject": email_details['subject'],
+                "success": result
+            })
+        else:
+            result = send_discord_notification(email_data, payment_info)
+            return jsonify({
+                "status": "sent",
+                "provider": "general",
+                "email_subject": email_details['subject'],
+                "success": result
+            })
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     print("🚀 Iniciando servidor Gmail-Discord con tokens persistentes...")
     print(f"📧 Cuentas configuradas: {len(GMAIL_ACCOUNTS)}")
     print(f"🔐 Tokens persistentes habilitados")
+    print(f"💾 History IDs persistentes habilitados")
+    
+    # Cargar history IDs desde variables de entorno al inicio
+    for email in GMAIL_ACCOUNTS:
+        history_id = get_last_history_id(email)
+        if history_id:
+            print(f"📍 History ID cargado para {email}: {history_id}")
     
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
