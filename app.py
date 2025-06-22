@@ -179,6 +179,9 @@ def extract_payment_info(email_content, subject):
 def send_discord_notification(email_data, payment_info):
     """Envía notificación a Discord con formato rico"""
     
+    print(f"🚀 Iniciando envío a Discord para email: {email_data.get('subject', 'Sin asunto')}")
+    print(f"🔗 Discord Webhook URL: {DISCORD_WEBHOOK_URL[:50]}...")
+    
     color = 0x00ff00
     if payment_info["amount"]:
         try:
@@ -245,8 +248,15 @@ def send_discord_notification(email_data, payment_info):
     
     payload = {"embeds": [embed]}
     
+    print(f"📦 Payload creado: {payload}")
+    
     try:
+        print("🌐 Enviando request a Discord...")
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        print(f"📊 Respuesta Discord - Status: {response.status_code}")
+        print(f"📊 Respuesta Discord - Headers: {dict(response.headers)}")
+        print(f"📊 Respuesta Discord - Content: {response.text}")
+        
         if response.status_code == 204:
             print("✅ Notificación enviada a Discord exitosamente")
             return True
