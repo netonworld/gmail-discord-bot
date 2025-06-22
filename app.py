@@ -408,23 +408,38 @@ def process_gmail_notification(email_address, history_id):
             print(f"🔍 Claves en respuesta: {list(history.keys())}")
             return
         
-        for record in history['history']:
+        print(f"🔍 Procesando {len(history['history'])} registros de historial")
+        
+        # Procesar cada cambio
+        for i, record in enumerate(history['history']):
+            print(f"📝 Procesando registro {i+1}: {record}")
+            
             if 'messagesAdded' in record:
-                for message_added in record['messagesAdded']:
+                print(f"📬 Encontrados mensajes agregados: {len(record['messagesAdded'])}")
+                for j, message_added in enumerate(record['messagesAdded']):
                     message_id = message_added['message']['id']
+                    print(f"📧 Procesando mensaje {j+1} con ID: {message_id}")
                     
+                    # Obtener detalles del email
                     email_details = get_email_details(service, message_id)
                     if not email_details:
+                        print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
                         continue
                     
+                    print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
+                    print(f"📄 Contenido preview: {email_details['content'][:100]}...")
+                    
+                    # Verificar si es un email de pago
                     if is_payment_email(email_details['subject'], email_details['content']):
                         print(f"💰 Email de pago detectado: {email_details['subject']}")
                         
+                        # Extraer información de pago
                         payment_info = extract_payment_info(
                             email_details['content'], 
                             email_details['subject']
                         )
                         
+                        # Preparar datos para Discord
                         email_data = {
                             "account": email_address,
                             "subject": email_details['subject'],
@@ -432,10 +447,46 @@ def process_gmail_notification(email_address, history_id):
                             "snippet": email_details['snippet']
                         }
                         
+                        # Enviar notificación a Discord
                         send_discord_notification(email_data, payment_info)
                     else:
                         print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
+            else:
+                print(f"🔍 Registro no contiene 'messagesAdded': {list(record.keys())}")
+                if 'messages' in record:
+                    print(f"📬 Encontrado campo 'messages': {record['messages']}")
+                    # Procesar mensajes en formato diferente
+                    for j, message in enumerate(record['messages']):
+                        message_id = message['id']
+                        print(f"📧 Procesando mensaje alternativo {j+1} con ID: {message_id}")
+                        
+                        email_details = get_email_details(service, message_id)
+                        if not email_details:
+                            print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
+                            continue
+                        
+                        print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
+                        
+                        if is_payment_email(email_details['subject'], email_details['content']):
+                            print(f"💰 Email de pago detectado: {email_details['subject']}")
+                            
+                            payment_info = extract_payment_info(
+                                email_details['content'], 
+                                email_details['subject']
+                            )
+                            
+                            email_data = {
+                                "account": email_address,
+                                "subject": email_details['subject'],
+                                "sender": email_details['sender'],
+                                "snippet": email_details['snippet']
+                            }
+                            
+                            send_discord_notification(email_data, payment_info)
+                        else:
+                            print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
         
+        print("✅ Procesamiento de historial completado")
     except Exception as e:
         print(f"❌ Error procesando notificación de Gmail: {e}")
 
