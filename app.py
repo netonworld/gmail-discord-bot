@@ -362,8 +362,9 @@ def send_provider_notification(email_data, payment_info, provider_id, provider_c
     
     webhook_url = provider_config.get('webhook_url')
     if not webhook_url:
-        print(f"❌ No hay webhook configurado para {provider_id}")
-        return False
+        print(f"⚠️ No hay webhook específico para {provider_id}, usando webhook general")
+        # Si no hay webhook específico, usar el general
+        return send_discord_notification(email_data, payment_info)
     
     provider_name = provider_config.get('name', provider_id.title())
     emoji = provider_config.get('emoji', '💰')
