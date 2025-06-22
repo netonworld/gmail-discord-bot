@@ -446,7 +446,19 @@ def send_provider_notification(email_data, payment_info, provider_id, provider_c
 def is_payment_email(subject, content):
     """Determina si un email es relacionado con pagos"""
     text_to_check = (subject + " " + content).lower()
-    return any(keyword.lower() in text_to_check for keyword in PAYMENT_KEYWORDS)
+    
+    # Primero verificar si contiene "binance" y "payment"
+    if "binance" in text_to_check and ("payment" in text_to_check or "pago" in text_to_check):
+        print(f"🏦 Detectado email de Binance con payment/pago")
+        return True
+    
+    # Luego verificar palabras clave generales
+    for keyword in PAYMENT_KEYWORDS:
+        if keyword.lower() in text_to_check:
+            print(f"🔍 Palabra clave encontrada: {keyword}")
+            return True
+    
+    return False
 
 def get_email_details(service, message_id):
     """Obtiene los detalles completos de un email"""
@@ -659,6 +671,7 @@ def process_gmail_notification(email_address, history_id):
                     print(f"🔍 Procesando {len(history['history'])} registros de historial")
                     
                     for record in history['history']:
+                        # Procesar messagesAdded
                         if 'messagesAdded' in record:
                             for message_added in record['messagesAdded']:
                                 message_id = message_added['message']['id']
@@ -674,6 +687,48 @@ def process_gmail_notification(email_address, history_id):
                                     continue
                                 
                                 print(f"📄 Email nuevo - Asunto: {email_details['subject']}")
+                                
+                                # Verificar si es un email de pago
+                                if is_payment_email(email_details['subject'], email_details['content']):
+                                    print(f"💰 Email de pago detectado: {email_details['subject']}")
+                                    
+                                    payment_info = extract_payment_info(
+                                        email_details['content'], 
+                                        email_details['subject']
+                                    )
+                                    
+                                    email_data = {
+                                        "account": email_address,
+                                        "subject": email_details['subject'],
+                                        "sender": email_details['sender'],
+                                        "snippet": email_details['snippet']
+                                    }
+                                    
+                                    # Detectar proveedor específico
+                                    provider_id, provider_config = detect_payment_provider(email_details)
+                                    
+                                    if provider_id and provider_config:
+                                        send_provider_notification(email_data, payment_info, provider_id, provider_config)
+                                    else:
+                                        send_discord_notification(email_data, payment_info)
+                                else:
+                                    print(f"ℹ️ Email no relacionado con pagos: {email_details['subject']}")
+                        
+                        # También procesar messages sin messagesAdded (cambios de etiquetas, etc)
+                        elif 'messages' in record:
+                            for message in record['messages']:
+                                message_id = message['id']
+                                
+                                # Solo procesar si no lo hemos visto antes
+                                if is_duplicate_message(message_id):
+                                    continue
+                                
+                                # Obtener detalles del email
+                                email_details = get_email_details(service, message_id)
+                                if not email_details:
+                                    continue
+                                
+                                print(f"📄 Email procesado - Asunto: {email_details['subject']}")
                                 
                                 # Verificar si es un email de pago
                                 if is_payment_email(email_details['subject'], email_details['content']):
