@@ -39,10 +39,26 @@ else:
         "cadete.daniel@gmail.com"
     ]
 
+# ============= CONFIGURACIÓN DE CANALES ESPECÍFICOS =============
+
+# Configuración para detectar pagos específicos por plataforma
+PAYMENT_PROVIDERS = {
+    "binance": {
+        "name": "Binance",
+        "webhook_url": os.environ.get('BINANCE_WEBHOOK_URL'),  # Nueva variable de entorno
+        "sender_domains": ["binance.com", "directmail.binance.com"],
+        "sender_emails": ["donotreply@directmail.binance.com"],
+        "subject_keywords": ["Payment Receive Successful", "Deposit Successful", "Transaction Completed"],
+        "emoji": "🪙",
+        "color": 0xF3BA2F  # Color dorado de Binance
+    }
+}
+
+# Mantener las palabras clave generales como backup
 PAYMENT_KEYWORDS = [
-    "pago recibido", "payment received", "paypal", "stripe", "transferencia",
-    "deposito", "transaccion", "factura pagada", "invoice paid", "zelle",
-    "mercadopago", "western union", "$", "usd", "eur", "cop", "mxn"
+    "pago recibido", "payment received", "payment successful", "transacción exitosa",
+    "transferencia recibida", "transfer completed", "deposito realizado",
+    "factura pagada", "invoice paid", "cobro realizado"
 ]
 
 # ============= FUNCIONES PARA PERSISTIR TOKENS =============
@@ -176,31 +192,59 @@ def extract_payment_info(email_content, subject):
     
     return payment_info
 
-def send_discord_notification(email_data, payment_info):
-    """Envía notificación a Discord con formato rico"""
+def detect_payment_provider(email_details):
+    """Detecta si un email es de un proveedor de pagos específico"""
+    sender = email_details.get('sender', '').lower()
+    subject = email_details.get('subject', '').lower()
     
-    print(f"🚀 Iniciando envío a Discord para email: {email_data.get('subject', 'Sin asunto')}")
-    print(f"🔗 Discord Webhook URL: {DISCORD_WEBHOOK_URL[:50]}...")
+    for provider_id, config in PAYMENT_PROVIDERS.items():
+        # Verificar dominio del remitente
+        for domain in config['sender_domains']:
+            if domain.lower() in sender:
+                # Verificar email específico si está configurado
+                if config['sender_emails']:
+                    for email in config['sender_emails']:
+                        if email.lower() in sender:
+                            # Verificar palabras clave en el asunto
+                            for keyword in config['subject_keywords']:
+                                if keyword.lower() in subject:
+                                    return provider_id, config
+                else:
+                    # Si no hay emails específicos, solo verificar asunto
+                    for keyword in config['subject_keywords']:
+                        if keyword.lower() in subject:
+                            return provider_id, config
     
-    color = 0x00ff00
-    if payment_info["amount"]:
-        try:
-            amount = float(payment_info["amount"].replace(",", ""))
-            if amount >= 1000:
-                color = 0xff0000
-            elif amount >= 500:
-                color = 0xffa500
-        except:
-            pass
+    return None, None
+
+def send_provider_notification(email_data, payment_info, provider_id, provider_config):
+    """Envía notificación específica del proveedor"""
+    
+    webhook_url = provider_config.get('webhook_url')
+    if not webhook_url:
+        print(f"❌ No hay webhook configurado para {provider_id}")
+        return False
+    
+    provider_name = provider_config.get('name', provider_id.title())
+    emoji = provider_config.get('emoji', '💰')
+    color = provider_config.get('color', 0x00ff00)
+    
+    print(f"🚀 Enviando notificación de {provider_name} para: {email_data.get('subject', 'Sin asunto')}")
+    print(f"🔗 Webhook URL: {webhook_url[:50]}...")
     
     embed = {
-        "title": "💰 NUEVO PAGO RECIBIDO",
+        "title": f"{emoji} NUEVO PAGO {provider_name.upper()}",
         "color": color,
         "timestamp": datetime.utcnow().isoformat(),
         "fields": [
             {
                 "name": "📧 Cuenta Gmail",
                 "value": email_data.get("account", "No especificada"),
+                "inline": True
+            },
+            {
+                "name": "🏦 Plataforma",
+                "value": provider_name,
                 "inline": True
             },
             {
@@ -211,17 +255,11 @@ def send_discord_notification(email_data, payment_info):
         ]
     }
     
+    # Agregar información de pago si está disponible
     if payment_info["amount"]:
         embed["fields"].append({
             "name": "💵 Monto",
             "value": f"{payment_info['amount']} {payment_info['currency'] or 'USD'}",
-            "inline": True
-        })
-    
-    if payment_info["method"]:
-        embed["fields"].append({
-            "name": "💳 Método",
-            "value": payment_info["method"].title(),
             "inline": True
         })
     
@@ -248,23 +286,21 @@ def send_discord_notification(email_data, payment_info):
     
     payload = {"embeds": [embed]}
     
-    print(f"📦 Payload creado: {payload}")
+    print(f"📦 Payload creado para {provider_name}: {payload}")
     
     try:
-        print("🌐 Enviando request a Discord...")
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        print(f"🌐 Enviando request a Discord ({provider_name})...")
+        response = requests.post(webhook_url, json=payload)
         print(f"📊 Respuesta Discord - Status: {response.status_code}")
-        print(f"📊 Respuesta Discord - Headers: {dict(response.headers)}")
-        print(f"📊 Respuesta Discord - Content: {response.text}")
         
         if response.status_code == 204:
-            print("✅ Notificación enviada a Discord exitosamente")
+            print(f"✅ Notificación de {provider_name} enviada exitosamente")
             return True
         else:
-            print(f"❌ Error enviando a Discord: {response.status_code}")
+            print(f"❌ Error enviando notificación de {provider_name}: {response.status_code}")
             return False
     except Exception as e:
-        print(f"❌ Error enviando notificación a Discord: {e}")
+        print(f"❌ Error enviando notificación de {provider_name}: {e}")
         return False
 
 def is_payment_email(subject, content):
