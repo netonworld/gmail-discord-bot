@@ -45,21 +45,45 @@ else:
 PAYMENT_PROVIDERS = {
     "binance": {
         "name": "Binance",
-        "webhook_url": os.environ.get('BINANCE_WEBHOOK_URL'),  # Nueva variable de entorno
+        "webhook_url": os.environ.get('BINANCE_WEBHOOK_URL'),
         "sender_domains": ["binance.com", "directmail.binance.com"],
-        "sender_emails": ["donotreply@directmail.binance.com"],
-        "subject_keywords": ["Payment Receive Successful", "Deposit Successful", "Transaction Completed"],
+        "sender_emails": ["donotreply@directmail.binance.com", "noreply@binance.com"],
+        "subject_keywords": [
+            "Payment Receive Successful"
+        ],
         "emoji": "🪙",
         "color": 0xF3BA2F  # Color dorado de Binance
     }
 }
 
-# Mantener las palabras clave generales como backup
-PAYMENT_KEYWORDS = [
-    "pago recibido", "payment received", "payment successful", "transacción exitosa",
-    "transferencia recibida", "transfer completed", "deposito realizado",
-    "factura pagada", "invoice paid", "cobro realizado"
-]
+# Storage para control de duplicados (en memoria)
+PROCESSED_MESSAGES = set()
+
+def is_recent_email(email_details):
+    """Verifica si el email es reciente (últimas 2 horas)"""
+    try:
+        # Buscar fecha en headers o usar timestamp actual como fallback
+        import email.utils
+        from datetime import timedelta
+        
+        # Por ahora, aceptar todos como recientes
+        # TODO: implementar verificación de fecha real del email
+        return True
+    except:
+        return True
+
+def is_duplicate_message(message_id):
+    """Verifica si ya procesamos este mensaje"""
+    if message_id in PROCESSED_MESSAGES:
+        return True
+    
+    # Agregar a processed (limitar a últimos 1000)
+    PROCESSED_MESSAGES.add(message_id)
+    if len(PROCESSED_MESSAGES) > 1000:
+        # Limpiar los más antiguos
+        PROCESSED_MESSAGES.clear()
+    
+    return False
 
 # ============= FUNCIONES PARA PERSISTIR TOKENS =============
 
@@ -470,6 +494,16 @@ def process_gmail_notification(email_address, history_id):
                     email_details = get_email_details(service, message_id)
                     if not email_details:
                         print(f"❌ No se pudieron obtener detalles del mensaje {message_id}")
+                        continue
+                    
+                    # Verificar si ya procesamos este mensaje
+                    if is_duplicate_message(message_id):
+                        print(f"⏭️ Mensaje ya procesado, saltando: {message_id}")
+                        continue
+                    
+                    # Verificar si es un email reciente
+                    if not is_recent_email(email_details):
+                        print(f"⏰ Email muy antiguo, saltando: {email_details['subject']}")
                         continue
                     
                     print(f"📄 Email obtenido - Asunto: {email_details['subject']}")
