@@ -8,6 +8,9 @@ from googleapiclient.discovery import build
 import requests
 from datetime import datetime
 import re
+import sys
+print("🛑 BOT DETENIDO TEMPORALMENTE")
+sys.exit(0)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this')
